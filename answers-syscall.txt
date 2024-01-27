@@ -1,0 +1,8 @@
+Q1: usertrap at kernel/trap.c:67
+Q2: the value of p->trapframe->a7 is 0x7, it is 7th syscall SYS_EXEC
+Q3: user mod
+Q4: 8000215a:	0b8080e7          	jalr	184(ra) # 8000120e <growproc>
+    a5
+Q5: something wrong! 
+    My gdb output: Breakpoint 1 at 0x8000215a: file kernel/sysproc.c, line 46.
+    ref output   : Breakpoint 1 at 0x8000215a: file kernel/syscall.c, line 247.
