@@ -75,6 +75,43 @@ int
 sys_pgaccess(void)
 {
   // lab pgtbl: your code here.
+  // read arguments
+  uint64 start_va;
+  int page_nums;
+  uint64 ubuffer_addr;
+  argaddr(0, &start_va);
+  argint(1, &page_nums);
+  argaddr(2, &ubuffer_addr);
+
+  if (page_nums > 64) {
+    printf("page_nums: %d\n", page_nums);
+    printf("sys_pgaccess: to many pages to check\n");
+    return -1;
+  }
+
+  uint64 bitmap = 0;
+  uint64 va = start_va;
+  pagetable_t pagetable = myproc()->pagetable;
+  for (int i = 0; i < page_nums; i++) {
+    pte_t *pte = walk(pagetable, va, 0);
+    if (pte == 0) {
+      printf("sys_pgaccess: invalid page\n");
+      return -1;
+    }
+    if (PTE_FLAGS(*pte) & PTE_A) {
+      bitmap |= (1L << i);
+    }
+
+    // clear PTE_A bit
+    *pte &= ~PTE_A;
+
+    va += PGSIZE;
+  }
+  if (copyout(pagetable, ubuffer_addr, (char *)&bitmap, sizeof(bitmap)) < 0) {
+    printf("sys_pgaccess: invalid buffer\n");
+    return -1;
+  }
+
   return 0;
 }
 #endif
