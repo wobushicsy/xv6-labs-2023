@@ -1,0 +1,3 @@
+Q1: Which other xv6 system call(s) could be made faster using this shared page? Explain how.
+  1. read syscall. we can make a copy to this shared page when sys_open is called, after that,
+  we can simplty read from the shared page
