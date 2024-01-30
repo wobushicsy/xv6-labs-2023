@@ -92,3 +92,31 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_sigalarm(void)
+{
+  int ticks;
+  uint64 handler_addr;
+  argint(0, &ticks);
+  argaddr(1, &handler_addr);
+
+  struct proc *p = myproc();
+  p->ticks = ticks;
+  p->ticks_cnt = ticks;
+  p->handler = handler_addr;
+
+  return 0;
+}
+
+uint64
+sys_sigreturn(void)
+{
+  // restore trapframe
+  struct proc *p = myproc();
+  *p->trapframe = *p->trapframe_copy;
+  p->trapframe_copy = 0;
+  p->ticks = p->ticks_cnt;
+
+  return p->trapframe->a0;
+}
