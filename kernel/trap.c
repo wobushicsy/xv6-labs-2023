@@ -67,6 +67,57 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if (r_scause() == 15) {
+    // page fault
+    uint64 va = r_stval();
+    if (va >= MAXVA) {
+      // va is greater than MAXVA
+      setkilled(p);
+      exit(-1);
+    }
+    uint64 ka = (uint64)kalloc();
+    if (ka == 0) {
+      setkilled(p);
+      exit(-1);
+    }
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if (pte == 0) {
+      // the va is not mapped
+      kfree((void *)ka);
+      printf("invalid pte\n");
+      setkilled(p);
+      exit(-1);
+    }
+    if (*pte & PTE_C && *pte & PTE_P) {
+      // copy on write page
+      va = PGROUNDDOWN(va);
+
+      // calculate new flags
+      int flags = PTE_FLAGS(*pte);
+      flags &= ~(PTE_C | PTE_P);
+      flags |= PTE_W;
+
+      // copy old page to new page
+      uint64 pa = PTE2PA(*pte);
+      memmove((void *)ka, (void *)pa, PGSIZE);
+
+      // unmap old page
+      uvmunmap(p->pagetable, va, 1, 1);
+
+      // map to new physical page
+      mappages(p->pagetable, va, PGSIZE, ka, flags);
+    } else if (*pte & PTE_P) {
+      // parent can't read
+      kfree((void *)ka);
+      printf("parent can't read\n");
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      setkilled(p);
+    } else {
+      kfree((void *)ka);
+      printf("unknown page fault\n");
+      setkilled(p);
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

@@ -14,6 +14,11 @@ void freerange(void *pa_start, void *pa_end);
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
+struct refcount {
+  struct spinlock lock;
+  int refcount[PHYSTOP >> PGSHIFT];
+} ref;
+
 struct run {
   struct run *next;
 };
@@ -46,6 +51,16 @@ freerange(void *pa_start, void *pa_end)
 void
 kfree(void *pa)
 {
+  uint64 idx = (uint64)pa >> PGSHIFT;
+  acquire(&ref.lock);
+  int cnt = --ref.refcount[idx];
+  if (cnt > 0) {
+    release(&ref.lock);
+    return;
+  }
+  ref.refcount[idx] = 0;
+  release(&ref.lock);
+
   struct run *r;
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
@@ -76,7 +91,27 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r) {
     memset((char*)r, 5, PGSIZE); // fill with junk
+    update_ref_count((uint64)r, 1);
+  }
   return (void*)r;
+}
+
+void
+update_ref_count(uint64 pa, int num)
+{
+  uint64 idx = pa >> PGSHIFT;
+  acquire(&ref.lock);
+  ref.refcount[idx] = num;
+  release(&ref.lock);
+}
+
+void
+add_ref_count(uint64 pa, int num)
+{
+  uint64 idx = pa >> PGSHIFT;
+  acquire(&ref.lock);
+  ref.refcount[idx] += num;
+  release(&ref.lock);
 }

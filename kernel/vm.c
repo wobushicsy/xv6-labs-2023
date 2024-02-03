@@ -315,22 +315,33 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+
     pa = PTE2PA(*pte);
+
+    // reset parent page flags
+    if (*pte & PTE_W) {
+      // if parent page can write, set PTE_P and clear PTE_W
+      *pte |= PTE_P;
+      *pte &= ~PTE_W;
+    }
+
+    // set cow flag
+    *pte |= PTE_C;
+
+    // set child flags
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
+
+    add_ref_count(pa, 1);
   }
   return 0;
 
@@ -360,6 +371,47 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
   pte_t *pte;
+
+  if (dstva >= MAXVA) {
+    return -1;
+  }
+
+  uint64 va = PGROUNDDOWN(dstva);
+  uint64 maxva = PGROUNDUP(dstva + len);
+  for (; va < maxva; va += PGSIZE) {
+    pte = walk(pagetable, va, 0);
+    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0) {
+      return -1;
+    }
+    if (*pte & PTE_W) {
+      // the page is writable
+      continue;
+    }
+    if (!((*pte & PTE_W) == 0 && (*pte & PTE_C) && (*pte & PTE_P))) {
+      return -1;
+    }
+    // the page is not writable but is a cow page
+    // same logic as page fault
+    uint64 ka = (uint64)kalloc();
+    if (ka == 0) {
+      // failed to allocate page
+      return -1;
+    }
+    // calculate new flags
+    int flags = PTE_FLAGS(*pte);
+    flags &= ~(PTE_C | PTE_P);
+    flags |= PTE_W;
+
+    // copy old page to new page
+    uint64 pa = PTE2PA(*pte);
+    memmove((void *)ka, (void *)pa, PGSIZE);
+
+    // unmap old page
+    uvmunmap(pagetable, va, 1, 1);
+
+    // map to new physical page
+    mappages(pagetable, va, PGSIZE, ka, flags);
+  }
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
