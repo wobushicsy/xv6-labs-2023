@@ -1,0 +1,5 @@
+Q1: Why are there missing keys with 2 threads, but not with 1 thread? Identify a
+    sequence of events with 2 threads that can lead to a key being missing.
+A1: In function put(), there is a chance that e is 0 at first, then a thread enters
+    insert() function and stoped, and another thread find e is 0 too and enters insert()
+    function, then there two keys to be inserted but only one get inserted successfully.
