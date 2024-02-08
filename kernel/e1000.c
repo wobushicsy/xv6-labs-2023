@@ -103,6 +103,38 @@ e1000_transmit(struct mbuf *m)
   // a pointer so that it can be freed after sending.
   //
   
+  acquire(&e1000_lock);
+
+  // First ask the E1000 for the TX ring index at which it's expecting the next
+  // packet, by reading the E1000_TDT control register.
+  uint32 tx_ring_idx = regs[E1000_TDT];
+  struct tx_desc *desc = tx_ring + tx_ring_idx;
+
+  // check if the the ring is overflowing
+  if (!(desc->status & E1000_TXD_STAT_DD)) {
+    // If E1000_TXD_STAT_DD is not set in the descriptor indexed by E1000_TDT, the E1000
+    // hasn't finished the corresponding previous transmission request, so return an error.
+    printf("overflow\n");
+    release(&e1000_lock);
+    return -1;
+  }
+
+  // use mbuffree() to free the last mbuf that was transmitted from that descriptor
+  // (if there was one).
+  if (tx_mbufs[tx_ring_idx]) {
+    mbuffree(tx_mbufs[tx_ring_idx]);
+  }
+  tx_mbufs[tx_ring_idx] = m;
+
+  // Then fill in the descriptor.
+  desc->addr = (uint64)m->head;
+  desc->length = m->len;
+  desc->cmd = E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP;
+
+  // Finally, update the ring position by adding one to E1000_TDT modulo TX_RING_SIZE.
+  regs[E1000_TDT] = (tx_ring_idx + 1) % TX_RING_SIZE;
+
+  release(&e1000_lock);
   return 0;
 }
 
@@ -115,6 +147,30 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+
+  while (1) {
+    // First ask the E1000 for the ring index at which the next waiting received packet (if any)
+    // is located
+    uint32 rx_ring_idx = (regs[E1000_RDT] + 1) % TX_RING_SIZE;
+
+    // Then check if a new packet is available
+    struct rx_desc *desc = rx_ring + rx_ring_idx;
+    if (!(desc->status & E1000_RXD_STAT_DD)) {
+      return;
+    }
+
+    struct mbuf *mbuf = rx_mbufs[rx_ring_idx];
+    mbuf->len = desc->length;
+    net_rx(mbuf);
+
+    rx_mbufs[rx_ring_idx] = mbufalloc(0);
+    mbuf = rx_mbufs[rx_ring_idx];
+    desc->addr = (uint64)mbuf->head;
+    desc->status = 0;
+
+    // update the E1000_RDT register
+    regs[E1000_RDT] = rx_ring_idx;
+  }
 }
 
 void
