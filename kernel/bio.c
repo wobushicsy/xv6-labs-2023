@@ -24,17 +24,15 @@
 #include "buf.h"
 
 #define NBUCKET 13
+#define MAX_SEARCH_RANGE 10
 
 #define HASH(bno) ((bno) % NBUCKET)
 
 struct {
-  struct spinlock lock;
   struct buf buf[NBUF];
 
-  // Linked list of all buffers, through prev/next.
-  // Sorted by how recently the buffer was used.
-  // head.next is most recent, head.prev is least.
-  uint bitmap;
+  // bitmap[i] is set to 1 indicates that buf[i] is being used
+  uint bitmap[NBUF];
 } bcache;
 
 struct bucket {
@@ -45,9 +43,12 @@ struct bucket {
 void
 binit(void)
 {
-  initlock(&bcache.lock, "bcache");
-
-  bcache.bitmap = 0;
+  // init bufs
+  for (int i = 0; i < NBUF; i++) {
+    bcache.bitmap[i] = 0;
+    struct buf *b = bcache.buf + i;
+    initsleeplock(&b->lock, "buffer");
+  }
 
   // init buckets
   for (int i = 0; i < NBUCKET; i++) {
@@ -83,17 +84,17 @@ bget(uint dev, uint blockno)
   }
 
   // Not cached.
-  // Recycle the least recently used (LRU) unused buffer.
+  // search the bitmap to find a free buf
   uint free_idx = -1;
-  acquire(&bcache.lock);
-  for (uint i = 0; i < NBUF; i++) {
-    if ((1 << i) & bcache.bitmap)
-      continue;
-    free_idx = i;
-    bcache.bitmap |= 1 << free_idx;
-    break;
+  for (uint i = 0; i < MAX_SEARCH_RANGE && free_idx == -1; i++) {
+    for (uint j = 0; j < NBUF; j++) {
+      if (__sync_lock_test_and_set(bcache.bitmap + j, 1) != 0) {
+        continue;
+      }
+      free_idx = j;
+      break;
+    }
   }
-  release(&bcache.lock);
   if (free_idx == -1) {
     panic("bget: no buffers");
   }
@@ -158,9 +159,7 @@ brelse(struct buf *b)
     b->next->prev = b->prev;
     b->prev->next = b->next;
     uint bidx = ((uint64)b - (uint64)bcache.buf) / sizeof(struct buf);
-    acquire(&bcache.lock);
-    bcache.bitmap &= ~(1 << bidx);
-    release(&bcache.lock);
+    __sync_lock_test_and_set(bcache.bitmap + bidx, 0);
   }
   
   release(&bucket->lock);
