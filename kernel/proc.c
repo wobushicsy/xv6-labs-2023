@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 
 struct cpu cpus[NCPU];
 
@@ -299,6 +303,13 @@ fork(void)
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
+  // duplicate all file in vma
+  np->nvma = p->nvma;
+  for (int i = 0; i < p->nvma; i++) {
+    np->vmas[i] = p->vmas[i];
+    filedup(p->vmas[i].f);
+  }
+
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
@@ -359,6 +370,29 @@ exit(int status)
       p->ofile[fd] = 0;
     }
   }
+
+  // clear all vmas
+  for (int i = 0; i < p->nvma; i++) {
+    struct vma *v = p->vmas + i;
+    for (uint64 va = v->addr; va < v->addr + v->length; va += PGSIZE) {
+      pte_t *pte = walk(p->pagetable, va, 0);
+      if (pte != 0 && *pte != 0) {
+        if (v->flags & MAP_SHARED) {
+          // if flags is marked MAP_SHARED, write content back to file
+          uint64 offset = va - v->addr_ord;
+          begin_op();
+          int nwritei = writei(v->f->ip, 1, va, offset, PGSIZE);
+          if (nwritei != PGSIZE) {
+            end_op();
+            panic("exit: failed to write back\n");
+          }
+          end_op();
+        }
+        uvmunmap(p->pagetable, va, 1, 1);
+      }
+    }
+  }
+  p->nvma = 0;
 
   begin_op();
   iput(p->cwd);

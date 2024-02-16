@@ -503,3 +503,194 @@ sys_pipe(void)
   }
   return 0;
 }
+
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  size_t length;
+  int prot, flags;
+  struct file *f;
+  off_t offset;
+
+  argaddr(0, &addr);
+  argaddr(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+  argfd(4, 0, &f);
+  argaddr(5, (uint64*)&offset);
+
+  // check file type
+  if (f->type != FD_INODE) {
+    printf("sys_mmap: file type not supported\n");
+    return -1;
+  }
+
+  // check flags
+  if (flags & MAP_SHARED && flags & MAP_PRIVATE) {
+    printf("sys_mmap: flags invalid\n");
+    return -1;
+  }
+
+  // no map
+  if (length == 0) {
+    return 0;
+  }
+
+  // check input
+  if (length % PGSIZE != 0) {
+    printf("sys_mmap: length not aligned");
+    return -1;
+  }
+
+  // check file type
+  if (!f->readable) {
+    if (prot & PROT_READ) {
+      printf("sys_mmap: file not readable\n");
+      return -1;
+    }
+  }
+  if (!f->writable) {
+    if (prot & PROT_WRITE && !(flags & MAP_PRIVATE)) {
+      printf("sys_mmap: file not writeable\n");
+      return -1;
+    }
+  }
+
+  // printf("addr = %p\n", addr);
+  // printf("length = %d\n", length);
+  // printf("prot = %d\n", prot);
+  // printf("flags = %d\n", flags);
+  // printf("offset = %d\n", offset);
+
+  // find an address
+  struct proc *p = myproc();
+  addr = MMAPADDR;
+  for (int i = 0; i < p->nvma; i++) {
+    struct vma *v = p->vmas + i;
+    addr += v->length_ord;
+  }
+  int npages = length / PGSIZE;
+  pte_t *pte = (pte_t *)-1;
+  for (int find = 0; !find;) {
+    // find a free pte
+    for (uint64 va = addr; pte != 0; va += PGSIZE) {
+      pte = walk(p->pagetable, va, 0);
+      if (pte == 0 || *pte == 0) {
+        addr = va;
+        break;
+      }
+    }
+
+    // see if that addr has enough free memory
+    for (uint64 va = addr; va < addr + npages * PGSIZE; va += PGSIZE) {
+      pte = walk(p->pagetable, va, 0);
+      if (pte != 0 && *pte != 0) {
+        addr = va;
+        find = 0;
+        break;
+      }
+      find = 1;
+    }
+  }
+
+  // initialize vma meta
+  struct vma *vma = &p->vmas[p->nvma++];
+  vma->addr = addr;
+  vma->addr_ord = addr;
+  vma->f = f;
+  vma->flags = flags;
+  vma->length = length;
+  vma->length_ord = length;
+  vma->prot = prot;
+
+  // duplicate file to avoid being evicted
+  filedup(f);
+
+  return addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  // assume that it will either unmap at the start, or at the end, or the whole region
+  // but not punch a hole in the middle of a region
+  uint64 addr;
+  size_t length;
+  argaddr(0, &addr);
+  argaddr(1, &length);
+
+  if (addr % PGSIZE != 0) {
+    printf("sys_munmap: address not aligned");
+    return -1;
+  }
+
+  if (length % PGSIZE != 0) {
+    printf("sys_munmap: length not aligned");
+    return -1;
+  }
+
+  struct proc *p = myproc();
+
+  // find vma
+  struct vma *vma = 0;
+  int vma_idx = 0;
+  for (int i = 0; i < p->nvma; i++) {
+    struct vma *v = p->vmas + i;
+    if (addr >= v->addr && addr < v->addr + v->length) {
+      vma = v;
+      vma_idx = i;
+      break;
+    }
+  }
+
+  // no corresponding vma
+  if (vma == 0) {
+    printf("sys_munmap: no vma\n");
+    return -1;
+  }
+
+  // unmap over flow
+  if (addr + length > vma->addr + vma->length) {
+    printf("sys_munmap: address overflow\n");
+    return -1;
+  }
+
+  // unmap pages
+  int npages = length / PGSIZE;
+  for (uint64 va = addr; va < addr + npages * PGSIZE; va += PGSIZE) {
+    // unmap pages
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if (pte != 0 && *pte != 0) {
+      if (vma->flags & MAP_SHARED) {
+        // if flags is marked MAP_SHARED, write content back to file
+        uint64 offset = va - vma->addr_ord;
+        begin_op();
+        int nwritei = writei(vma->f->ip, 1, va, offset, PGSIZE);
+        if (nwritei != PGSIZE) {
+          end_op();
+          printf("sys_munmap: failed to write back\n");
+          return -1;
+        }
+        end_op();
+      }
+      uvmunmap(p->pagetable, va, 1, 1);
+    }
+  }
+
+  // update vma
+  if (addr == vma->addr) {
+    vma->addr += npages * PGSIZE;
+    vma->length -= npages * PGSIZE;
+    if (vma->length == 0) {
+      fileclose(vma->f);
+      p->nvma--;
+      p->vmas[vma_idx] = p->vmas[p->nvma];
+    }
+  } else {
+    vma->length -= npages * PGSIZE;
+  }
+
+  return 0;
+}

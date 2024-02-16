@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -67,7 +71,53 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if (r_scause() == 13) {
+    // page fault
+    uint64 va = r_stval();
+    va = PGROUNDDOWN(va);
+
+    // find vma
+    struct vma *vma = 0;
+    for (int i = 0; i < p->nvma; i++) {
+      struct vma *v = p->vmas + i;
+      if (va >= v->addr && va < v->addr + v->length) {
+        vma = v;
+        break;
+      }
+    }
+    if (vma == 0) {
+      printf("detect page fault but no corresponding vma\n");
+      goto err;
+    }
+
+    // // fetch a physical page and write data into it
+    uint64 ka = (uint64)kalloc();
+    if (ka == 0) {
+      panic("usertrap: no free physical memory");
+    }
+    uint len = vma->length - (va - vma->addr);
+    int nreadi = readi(vma->f->ip, 0, ka, va - vma->addr, len > PGSIZE ? PGSIZE : len);
+    if (nreadi < PGSIZE) {
+      // if read memory is less than PGSIZE, fill with 0
+      memset((void *)ka + nreadi, 0, PGSIZE - nreadi);
+    }
+
+    // map that page
+    int perm = 0;
+    if (vma->prot & PROT_READ) {
+      perm |= PTE_R;
+    }
+    if (vma->prot & PROT_WRITE) {
+      perm |= PTE_W;
+    }
+    perm |= PTE_U;
+    if (mappages(p->pagetable, va, PGSIZE, ka, perm)) {
+      printf("usertrap: failed to mappages");
+      kfree((void*)ka);
+      goto err;
+    }
   } else {
+   err:
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     setkilled(p);
